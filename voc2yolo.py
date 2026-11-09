@@ -1,4 +1,4 @@
-import random, shutil, xml.etree.ElementTree as ET
+import random, re, shutil, xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
 
@@ -8,6 +8,26 @@ RICE_CLASSES = [
     "white backed plant hopper", "small brown plant hopper", "rice water weevil",
     "rice leafhopper", "grain spreader thrips", "rice shell pest",
 ]
+
+
+def parse_annotation(path):
+    """Baca XML VOC. Sebagian file IP102 rusak (mis. dua <annotation> tergabung);
+    file seperti itu dibaca ulang dan semua <object> di dalamnya digabung."""
+    try:
+        return ET.parse(path).getroot()
+    except ET.ParseError:
+        txt = Path(path).read_text(encoding="utf-8", errors="ignore")
+        txt = re.sub(r"<\?xml[^>]*\?>", "", txt)
+        try:
+            wrapper = ET.fromstring(f"<root>{txt}</root>")
+        except ET.ParseError:
+            return None
+        anns = wrapper.findall("annotation") or [wrapper]
+        root = anns[0]
+        for extra in anns[1:]:
+            for o in extra.findall("object"):
+                root.append(o)
+        return root
 
 
 def find_voc_root(base):
@@ -33,7 +53,10 @@ def detect_zero_based(ann_dir, sample=3000):
     for k, x in enumerate(Path(ann_dir).glob("*.xml")):
         if k >= sample:
             break
-        for o in ET.parse(x).getroot().iter("object"):
+        root = parse_annotation(x)
+        if root is None:
+            continue
+        for o in root.iter("object"):
             names.add(o.findtext("name", "").strip())
     nums = {int(n) for n in names if n.isdigit()}
     if not nums:
@@ -55,9 +78,12 @@ def voc_to_yolo(voc_root, out_dir, val_ratio=0.2, seed=42):
                 split_of[line.strip()] = s
 
     images = {p.stem: p for p in img_dir.iterdir() if p.suffix.lower() in (".jpg", ".jpeg", ".png")}
-    kept, counts = [], Counter()
+    kept, counts, skipped = [], Counter(), 0
     for xml in sorted(ann_dir.glob("*.xml")):
-        root = ET.parse(xml).getroot()
+        root = parse_annotation(xml)
+        if root is None:
+            skipped += 1
+            continue
         w = float(root.findtext("size/width", "0") or 0)
         h = float(root.findtext("size/height", "0") or 0)
         img = images.get(xml.stem)
@@ -97,4 +123,6 @@ def voc_to_yolo(voc_root, out_dir, val_ratio=0.2, seed=42):
         f"nc: {len(RICE_CLASSES)}\nnames:\n" + "".join(f"  {i}: {n}\n" for i, n in enumerate(RICE_CLASSES))
     )
     n_split = Counter(split_of.get(s) or "random" for s, _, _ in kept)
+    if skipped:
+        print(f"Peringatan: {skipped} file anotasi tidak bisa dibaca dan dilewati.")
     return yaml, counts, len(kept), zero_based, n_split
